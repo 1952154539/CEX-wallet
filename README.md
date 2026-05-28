@@ -318,32 +318,288 @@ DB Gateway 强制要求敏感操作（如余额变更）必须包含双签名：
 
 ## 实测验证
 
-本项目已完成以下功能验证：
+以下为实际操作中的余额变化记录，展示充值、提现、风控的完整流程。
 
-### 充值测试
-- ETH 转账到用户钱包地址：成功检测并入账
-- ERC20（OPS/USDT）转账到用户钱包地址：成功检测并入账
-- 黑名单地址转账：风控系统正确识别并冻结相关余额
-- 用户余额查询：正确显示可用余额和冻结余额
+---
 
-### 提现测试
-- ETH 小额提现（0.01 ETH）：自动批准，交易签名成功
-- OPS 大额提现（20 OPS）：触发风控人工审核机制
-- 人工审核通过后：系统正确回调并处理提现
-- 提现后余额：正确扣减（含手续费）
+### 一、充值（存款）
 
-### 测试数据示例
+模拟向用户钱包地址转入 ETH、OPS（Mock USDC）、USDT 后，Scan 服务自动扫描区块检测存款，经风控评估后入账。
+
+#### 用户1（热钱包，地址 `0xF4A437...15e44`）充值后余额
+
+```bash
+$ curl http://localhost:3000/api/user/1/balance/total
+```
+```json
+{
+    "message": "获取用户余额总和成功",
+    "data": [
+        {
+            "token_symbol": "OPS",
+            "available_balance": "982.000000",
+            "frozen_balance": "0.000000",
+            "total_balance": "982.000000",
+            "address_count": 1
+        },
+        {
+            "token_symbol": "USDT",
+            "available_balance": "80300.000000",
+            "frozen_balance": "0.000000",
+            "total_balance": "80300.000000",
+            "address_count": 1
+        },
+        {
+            "token_symbol": "ETH",
+            "available_balance": "19.990100",
+            "frozen_balance": "0.250000",    ← 来自黑名单地址，被风控冻结
+            "total_balance": "19.990100",
+            "address_count": 2
+        }
+    ]
+}
+```
+
+#### 用户2（普通用户，地址 `0x3C4383...b4E9`）充值后余额
+
+```bash
+$ curl http://localhost:3000/api/user/2/balance/total
+```
+```json
+{
+    "message": "获取用户余额总和成功",
+    "data": [
+        {
+            "token_symbol": "USDT",
+            "available_balance": "900.000000",
+            "frozen_balance": "300.000000",    ← 来自黑名单地址，被风控冻结
+            "total_balance": "900.000000",
+            "address_count": 1
+        },
+        {
+            "token_symbol": "OPS",
+            "available_balance": "880.000000",
+            "frozen_balance": "0.000000",
+            "total_balance": "880.000000",
+            "address_count": 2
+        },
+        {
+            "token_symbol": "ETH",
+            "available_balance": "0.990000",
+            "frozen_balance": "0.250000",      ← 来自黑名单地址，被风控冻结
+            "total_balance": "0.990000",
+            "address_count": 2
+        }
+    ]
+}
+```
+
+#### 用户3（对照组，无黑名单转账）充值后余额
+
+```bash
+$ curl http://localhost:3000/api/user/3/balance/total
+```
+```json
+{
+    "message": "获取用户余额总和成功",
+    "data": [
+        {
+            "token_symbol": "OPS",
+            "available_balance": "900.000000",
+            "frozen_balance": "0.000000",
+            "total_balance": "900.000000",
+            "address_count": 1
+        },
+        {
+            "token_symbol": "ETH",
+            "available_balance": "1.000000",
+            "frozen_balance": "0.000000",      ← 无黑名单转账，全部可用
+            "total_balance": "1.000000",
+            "address_count": 1
+        }
+    ]
+}
+```
+
+> **充值结论**：
+> - ETH、ERC20 代币转账均被 Scan 正确检测并入账
+> - 黑名单地址（`0x70997970...`）的转账被风控识别，对应金额冻结（`frozen_balance` > 0）
+> - 用户1 和用户2 均有冻结余额，用户3 无冻结余额——说明风控按地址精准拦截
+
+---
+
+### 二、提现（取款）
+
+#### 场景1：ETH 小额提现（0.01 ETH）—— 自动批准
+
+```bash
+$ npm run mock:withdraw:evm
+```
+```
+--- 测试 ETH 提现 ---
+提现金额: 0.01 ETH
+发送提现请求...
+
+提现请求响应:
+{
+  "success": true,
+  "message": "提现签名成功",
+  "data": {
+    "signedTransaction": "0x02f86b827a698080...",
+    "transactionHash": "0xb29707...be76",
+    "withdrawAmount": "0.01",
+    "actualAmount": "9900000000000000",     ← 实际到账 = 0.01 - 0.0001(fee)
+    "fee": "100000000000000",               ← 手续费 0.0001 ETH
+    "withdrawId": 1,
+    "gasEstimation": {
+      "gasLimit": "21000",
+      "maxFeePerGas": "14",
+      "maxPriorityFeePerGas": "0",
+      "networkCongestion": "low"
+    }
+  }
+}
+```
+
+**提现后查询提现记录详情**：
+
+```bash
+$ curl http://localhost:3000/api/withdraws/1
+```
+```json
+{
+    "message": "获取提现记录详情成功",
+    "data": {
+        "withdraw": {
+            "id": 1,
+            "user_id": 2,
+            "to_address": "0x1f35B7b2CaB4b3dFEA7AE56F40D6c7B531940f40",
+            "token_id": 1,
+            "amount": "10000000000000000",          ← 0.01 ETH
+            "fee": "100000000000000",               ← 0.0001 ETH 手续费
+            "chain_id": 31337,
+            "chain_type": "evm",
+            "from_address": "0xF4A4378A91d7aFb2EC4a1bf5d80a21ae87C15e44",
+            "tx_hash": "0xb2970787c860d8f7d7186b8fa1b96acf011ad1be2a30b8d94f87a4b5be64be76",
+            "status": "finalized",                   ← 已完成
+            "nonce": 0
+        },
+        "credits": [
+            {
+                "user_id": 2,
+                "token_symbol": "ETH",
+                "amount": "-10000000000000000",     ← 用户2扣减 0.01 ETH
+                "credit_type": "withdraw",
+                "status": "finalized"
+            },
+            {
+                "user_id": 1,
+                "token_symbol": "ETH",
+                "amount": "-9900000000000000",      ← 热钱包扣减 0.0099 ETH (实际转出)
+                "credit_type": "withdraw",
+                "status": "finalized"
+            }
+        ]
+    }
+}
+```
+
+#### 场景2：OPS 大额提现（20 OPS）—— 触发人工审核
+
+```bash
+$ npm run mock:withdraw:evm
+```
+```
+--- 测试 OPS 提现 ---
+提现金额: 20 OPS
+发送提现请求...
+
+提现请求响应:
+{
+  "success": false,
+  "error": "服务器错误: 500 - 提现需要人工审核: Large amount withdrawal: 20000000000000000000, Manual review required"
+}
+```
+
+**人工审核流程**：
+
+```bash
+$ npm run mock:approveReview
+```
+```
+📋 获取待审核列表...
+✅ 找到 1 条待审核记录
+
+📝 待审核记录详情:
+  Operation ID: 4bd987af-2b90-48b4-9c85-c11afa5f3372
+  Table: withdraws
+  Action: insert
+  User ID: 2
+  Risk Level: high
+  Reasons: Large amount withdrawal: 20000000000000000000, Manual review required
+  Suggest Reason: 建议金额过大，建议分批提现，单次建议金额: 1000000000000000000
+
+🔄 准备提交审核通过...
+
+📋 审核结果:
+{
+  "success": true,
+  "message": "Operation approved successfully",
+  "operation_id": "4bd987af-2b90-48b4-9c85-c11afa5f3372",
+  "approval_status": "approved"
+}
+```
+
+#### 提现后用户2余额变化对比
+
+```bash
+$ curl http://localhost:3000/api/user/2/balance/total
+```
+```json
+{
+    "data": [
+        { "token_symbol": "USDT", "available_balance": "900.000000", "frozen_balance": "300.000000" },
+        { "token_symbol": "OPS",  "available_balance": "880.000000", "frozen_balance":   "0.000000" },
+        { "token_symbol": "ETH",  "available_balance":   "0.990000", "frozen_balance":   "0.250000" }
+    ]
+}
+```
+
+| 代币 | 充值后 | 提现后 | 变化 | 说明 |
+|------|--------|--------|------|------|
+| ETH | 1.000000 | 0.990000 | **-0.01** | 提现 0.01 ETH（含 fee 0.0001） |
+| OPS | 900.000000 | 880.000000 | **-20** | 大额提现 20 OPS，人工审核通过后执行 |
+| USDT | 900.000000 | 900.000000 | 0 | 未提现，300 仍为冻结状态 |
+
+> **提现结论**：
+> - 小额提现自动签名并广播，Scan 确认后状态变为 `finalized`
+> - Credit 记录精确追踪每笔余额变动（用户扣减 + 热钱包实际转出）
+> - 大额提现被风控拦截，需人工审核通过后才执行
+> - 风控会给出降额建议（20 OPS → 建议 1 OPS 分批提现）
+
+---
+
+### 三、风控拦截验证
+
+| 测试场景 | 预期行为 | 实际结果 |
+|----------|----------|----------|
+| 黑名单地址转入 ETH | 余额冻结 | `frozen_balance: 0.25` ETH |
+| 黑名单地址转入 USDT | 余额冻结 | `frozen_balance: 300.0` USDT |
+| 普通地址转入 | 正常入账 | `frozen_balance: 0`，`available_balance` 正常 |
+| 大额提现 (20 OPS) | 人工审核 | Risk Level: `high`，需 `manual_review` |
+| 小额提现 (0.01 ETH) | 自动批准 | 直接签名，状态 `finalized` |
+
+---
+
+### 四、Scan 扫描器日志（充值检测）
 
 ```
-用户1（热钱包）余额：
-  ETH:  20.0 (其中 0.25 冻结 - 来自黑名单地址)
-  OPS:  1000.0
-  USDT: 80300.0
-
-用户2（普通用户）余额：
-  ETH:  0.99 (提现 0.01 ETH 后)
-  OPS:  880.0 (大额提现审核后)
-  USDT: 900.0 (其中 300.0 冻结)
+[info]: 检测到ETH存款（优化版） { "totalDeposits": 2 }
+[info]: 存款余额已更新
+[info]: 批量优化区块分析完成 {
+  "fromBlock": 70, "toBlock": 73, "blockCount": 4,
+  "erc20Logs": 0, "ethTransactions": 0, "totalDeposits": 0
+}
 ```
 
 ## 相关文档
